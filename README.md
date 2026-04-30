@@ -30,7 +30,7 @@ Cada tambor genera un número aleatorio entre 1 y 7. Los números del 1 al 6 tie
 
 ### 2.3 Detección de Secuencias
 
-Una "secuencia consecutiva" se define como tres números que forman una escalera ascendente (diferencia de +1 entre cada par consecutivo). Para detectarla, se ordenan los tres tambores y se verifica que formen una escalera en orden ascendente.
+Una "secuencia consecutiva" se define como tres números que forman una escalera ascendente (diferencia de +1 entre cada par consecutivo). Para detectarla, se ordenan los tres tambores y se verifica que formen una escalera. Esto significa que 3-1-2 también cuenta como secuencia (es 1-2-3 desordenado).
 
 **Decisión de diseño:** Se evalúa en este orden de prioridad (de mayor a menor):
 1. Jackpot (7-7-7) — verificar primero porque también sería "tres iguales"
@@ -60,8 +60,7 @@ Solo la probabilidad de obtener un 7 en cada tambor aumenta conforme crece el ja
 | Componente | Cantidad | Función |
 |---|---|---|
 | Arduino UNO R3 | 1 | Microcontrolador principal |
-| LCD 2004 (20x4 caracteres) | 1 | Pantalla principal del juego |
-| Potenciómetro 10kΩ | 1 | Control de contraste del LCD |
+| LCD 2004 (20x4 caracteres) con módulo I2C (PCF8574) | 1 | Pantalla principal del juego |
 | Botón pulsador | 3 | Navegación: ARRIBA, ABAJO, ACCIÓN |
 | LED verde | 1 | Indicador de premio pequeño |
 | LED amarillo | 1 | Indicador de premio grande |
@@ -72,22 +71,16 @@ Solo la probabilidad de obtener un 7 en cada tambor aumenta conforme crece el ja
 
 ### 3.2 Asignación de Pines
 
-El LCD 2004 en modo 4-bit consume 6 pines digitales. Se planifica la asignación así:
+El LCD 2004 con módulo I2C consume solo 2 pines (SDA/SCL). Se planifica la asignación así:
 
 ```
-LCD 2004 (modo 4-bit):
-  RS  → Pin 12
-  EN  → Pin 11
-  D4  → Pin 5
-  D5  → Pin 4
-  D6  → Pin 3
-  D7  → Pin 2
-  RW  → GND (solo escritura)
-  VO  → Potenciómetro (contraste)
-  VSS → GND
-  VDD → 5V
-  A   → 5V (backlight ánodo)
-  K   → GND (backlight cátodo)
+LCD 2004 (I2C via PCF8574):
+  SDA → A4
+  SCL → A5
+  VCC → 5V
+  GND → GND
+  Dirección I2C: 0x27 (variantes pueden usar 0x3F)
+  Contraste: ajustable con el potenciómetro integrado en el módulo PCF8574
 
 Botones (con pull-down a GND, lectura HIGH al presionar):
   BTN_ARRIBA  → Pin 8
@@ -105,10 +98,11 @@ Buzzer:
   BUZZER       → Pin 13
 
 Libre:
-  A3, A4, A5   → Sin usar (reservados para expansión futura)
+  A3           → Sin usar (reservado para randomSeed y expansión futura)
+  D2–D5, D11, D12 → Libres (antes usados por LCD en modo 4-bit)
 ```
 
-**Decisión de diseño — LCD sin I2C:** Aunque un módulo I2C ahorraría pines (solo SDA/SCL en A4/A5), se usa conexión directa porque el enunciado indica que se trabaja con el kit provisto y el LCD 2004 no tiene adaptador I2C. La librería `LiquidCrystal` estándar es suficiente y no agrega dependencias externas.
+**Decisión de diseño — LCD con I2C (PCF8574):** El módulo adaptador I2C reduce la conexión del LCD de 6 pines a solo 2 (SDA/SCL en A4/A5), simplificando enormemente el cableado y liberando los pines digitales D2–D5, D11 y D12 para uso futuro. El contraste se ajusta con el potenciómetro integrado en el módulo PCF8574, eliminando el potenciómetro externo. La librería `LiquidCrystal_I2C` es el estándar para este adaptador y su API es prácticamente idéntica a `LiquidCrystal`.
 
 **Decisión de diseño — Pines analógicos como digitales:** Los pines A0-A2 se configuran como `OUTPUT` digital para el LED RGB. Esto es perfectamente válido en el ATmega328P y libera pines digitales para componentes que los necesitan más (LCD, botones).
 
@@ -118,12 +112,12 @@ Libre:
 
 | Recurso | Pines usados | Detalle |
 |---|---|---|
-| LCD 2004 | 6 digitales | D2, D3, D4, D5, D11, D12 |
+| LCD 2004 (I2C) | 2 analógicos/I2C | A4 (SDA), A5 (SCL) |
 | Botones | 3 digitales | D8, D9, D10 |
 | LEDs simples | 2 digitales | D6, D7 |
 | LED RGB | 3 analógicos | A0, A1, A2 |
 | Buzzer | 1 digital | D13 |
-| **Total** | **15 de 20 disponibles** | Quedan A3, A4, A5 libres |
+| **Total** | **11 de 20 disponibles** | Quedan D2–D5, D11, D12 y A3 libres |
 
 ---
 
@@ -257,9 +251,9 @@ función calcularPeso7(jackpot):
 
 ### 5.4 Semilla del Generador Aleatorio
 
-Se usa `randomSeed(analogRead(A5))` en `setup()` leyendo un pin analógico no conectado (A5 está libre) para obtener ruido eléctrico como semilla. Esto garantiza secuencias diferentes en cada encendido.
+Se usa `randomSeed(analogRead(A3))` en `setup()` leyendo un pin analógico no conectado (A3 está libre) para obtener ruido eléctrico como semilla. Esto garantiza secuencias diferentes en cada encendido.
 
-**Decisión de diseño — A5 flotante:** El pin A5 no está conectado a ningún componente, lo cual lo hace ideal para lectura de ruido. Si en el futuro se conecta algo a A5, se deberá usar A4 o A3.
+**Decisión de diseño — A3 flotante:** El pin A3 no está conectado a ningún componente, lo cual lo hace ideal para lectura de ruido. Los pines A4 y A5 están reservados para I2C (SDA/SCL del LCD), por lo que A3 es el pin libre más adecuado para este propósito.
 
 ---
 
@@ -325,7 +319,7 @@ función inicializarEEPROM():
 ```
 slot_machine.ino
 ├── [1] Includes y Constantes
-│   ├── #include <LiquidCrystal.h>
+│   ├── #include <LiquidCrystal_I2C.h>
 │   ├── #include <EEPROM.h>
 │   ├── Constexpr de pines
 │   ├── Constexpr de juego (pesos, premios, tiempos)
@@ -336,7 +330,7 @@ slot_machine.ino
 │   ├── enum Premio : uint8_t
 │   ├── Estado estadoActual
 │   ├── Variables de estado del juego
-│   └── Objeto LiquidCrystal
+│   └── Objeto LiquidCrystal_I2C lcd(0x27, 20, 4)
 │
 ├── [3] Funciones de EEPROM
 │   ├── inicializarEEPROM()
@@ -465,10 +459,10 @@ constexpr uint16_t DEBOUNCE_MS = 200;
 
 Melodías cortas usando `tone()`:
 
-- **Sin premio:** Una melodía grave corta.
-- **Premio pequeño:** Canción de tonos ascendentes.
+- **Sin premio:** Un tono grave corto (200Hz, 200ms).
+- **Premio pequeño:** Tres tonos ascendentes (440Hz → 554Hz → 659Hz).
 - **Premio grande:** Escala ascendente más larga con ritmo.
-- **JACKPOT:** Melodía con ritmo festivo.
+- **JACKPOT:** Fanfarria de 5-6 notas con ritmo festivo.
 
 **Decisión de diseño — `tone()` no bloqueante:** `tone()` de Arduino genera la onda en hardware (Timer2), así que no bloquea el CPU. Sin embargo, solo puede tocar un tono a la vez. Las melodías se implementan como secuencias de tonos temporizadas con `millis()`.
 
@@ -482,11 +476,11 @@ Melodías cortas usando `tone()`:
 |---|---|
 | Variables globales (estado, contadores, flags) | ~20 |
 | Buffer LCD (char[21]) | ~21 |
-| Objeto LiquidCrystal | ~60 |
+| Objeto LiquidCrystal_I2C | ~70 |
 | Tabla de pesos (uint8_t[7]) | 7 |
 | Array de tambores (uint8_t[3]) | 3 |
 | Stack (funciones, variables locales) | ~200 |
-| **Total estimado** | **~311 bytes (~15% de SRAM)** |
+| **Total estimado** | **~321 bytes (~16% de SRAM)** |
 
 Muy holgado. No se prevén problemas de memoria.
 
@@ -495,7 +489,7 @@ Muy holgado. No se prevén problemas de memoria.
 | Recurso | Bytes Estimados |
 |---|---|
 | Código del programa | ~4,000-6,000 |
-| Librería LiquidCrystal | ~1,500 |
+| Librería LiquidCrystal_I2C | ~1,500 |
 | Librería EEPROM | ~200 |
 | Strings en Flash (F()) | ~500 |
 | **Total estimado** | **~6,200-8,200 bytes (~20-25% de Flash)** |
@@ -506,7 +500,7 @@ Muy holgado también.
 
 ## 12. Decisiones de Diseño Consolidadas
 
-1. **LCD directo (sin I2C):** Se usa conexión de 6 pines porque el kit no incluye adaptador I2C. Esto consume más pines pero evita dependencias de hardware extra.
+1. **LCD con módulo I2C (PCF8574):** Se usa el adaptador I2C porque reduce la conexión de 6 pines a 2 (SDA/SCL), simplifica el montaje físico y elimina el potenciómetro externo de contraste. Los pines digitales D2–D5, D11 y D12 quedan libres para uso futuro.
 
 2. **Pines analógicos como digitales para LED RGB:** Libera pines digitales para el LCD y botones. Perfectamente válido en el ATmega328P.
 
