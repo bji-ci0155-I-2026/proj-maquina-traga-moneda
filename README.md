@@ -30,7 +30,7 @@ Cada tambor genera un número aleatorio entre 1 y 7. Los números del 1 al 6 tie
 
 ### 2.3 Detección de Secuencias
 
-Una "secuencia consecutiva" se define como tres números que forman una escalera ascendente (diferencia de +1 entre cada par consecutivo). Para detectarla, se ordenan los tres tambores y se verifica que formen una escalera. Esto significa que 3-1-2 también cuenta como secuencia (es 1-2-3 desordenado).
+Una "secuencia consecutiva" se define como tres números que forman una escalera ascendente (diferencia de +1 entre cada par consecutivo). Para detectarla, se ordenan los tres tambores y se verifica que formen una escalera en orden ascendente.
 
 **Decisión de diseño:** Se evalúa en este orden de prioridad (de mayor a menor):
 1. Jackpot (7-7-7) — verificar primero porque también sería "tres iguales"
@@ -465,10 +465,10 @@ constexpr uint16_t DEBOUNCE_MS = 200;
 
 Melodías cortas usando `tone()`:
 
-- **Sin premio:** Un tono grave corto (200Hz, 200ms).
-- **Premio pequeño:** Tres tonos ascendentes (440Hz → 554Hz → 659Hz).
+- **Sin premio:** Una melodía grave corta.
+- **Premio pequeño:** Canción de tonos ascendentes.
 - **Premio grande:** Escala ascendente más larga con ritmo.
-- **JACKPOT:** Fanfarria de 5-6 notas con ritmo festivo.
+- **JACKPOT:** Melodía con ritmo festivo.
 
 **Decisión de diseño — `tone()` no bloqueante:** `tone()` de Arduino genera la onda en hardware (Timer2), así que no bloquea el CPU. Sin embargo, solo puede tocar un tono a la vez. Las melodías se implementan como secuencias de tonos temporizadas con `millis()`.
 
