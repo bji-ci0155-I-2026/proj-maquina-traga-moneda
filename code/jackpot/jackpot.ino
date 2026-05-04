@@ -65,6 +65,18 @@ static const uint16_t PROGMEM NOTAS_GRANDE[]  = {523, 100, 587, 100, 659, 100,
 static const uint16_t PROGMEM NOTAS_JACKPOT[] = {523, 100, 659, 100, 784, 100,
                                                   1047, 150, 784, 100, 1047, 500, 0, 0};
 
+// Debug serie — descomenta la siguiente línea para activar la salida de diagnóstico
+#define DEBUG_SERIAL
+static constexpr uint32_t DEBUG_BAUD = 115200;
+
+#ifdef DEBUG_SERIAL
+  #define DBG(msg)        Serial.println(F(msg))
+  #define DBG_VAL(lbl, v) do { Serial.print(F(lbl ": ")); Serial.println(v); } while(0)
+#else
+  #define DBG(msg)        ((void)0)
+  #define DBG_VAL(lbl, v) ((void)0)
+#endif
+
 // =============================================================================
 // [2] ENUMS Y VARIABLES GLOBALES
 // =============================================================================
@@ -114,6 +126,43 @@ static uint8_t  rgbFase  = 0;  // 0=R, 1=G, 2=B para el ciclo jackpot
 LiquidCrystal_I2C lcd(LCD_I2C_ADDR, 20, 4);
 
 // =============================================================================
+// [2b] HELPERS DE DEBUG (solo se compilan con DEBUG_SERIAL activo)
+// =============================================================================
+
+#ifdef DEBUG_SERIAL
+static const __FlashStringHelper* nombreEstado(Estado e) {
+    switch(e) {
+        case EST_STANDBY:    return F("STANDBY");
+        case EST_MENU:       return F("MENU");
+        case EST_GIRANDO:    return F("GIRANDO");
+        case EST_EVALUANDO:  return F("EVALUANDO");
+        case EST_RESULTADO:  return F("RESULTADO");
+        case EST_VER_PREMIO: return F("VER_PREMIO");
+        default:             return F("?");
+    }
+}
+static const __FlashStringHelper* nombrePremio(TipoPremio p) {
+    switch(p) {
+        case PREMIO_JACKPOT:  return F("JACKPOT");
+        case PREMIO_TRIPLE:   return F("TRIPLE");
+        case PREMIO_PAR_SEQ:  return F("PAR/SEQ");
+        case PREMIO_NINGUNO:  return F("NINGUNO");
+        default:              return F("?");
+    }
+}
+static void cambiarEstado(Estado nuevo) {
+    Serial.print(F("[FSM] "));
+    Serial.print(nombreEstado(estadoActual));
+    Serial.print(F(" -> "));
+    Serial.println(nombreEstado(nuevo));
+    estadoActual = nuevo;
+}
+#define SET_ESTADO(e) cambiarEstado(e)
+#else
+#define SET_ESTADO(e) (estadoActual = (e))
+#endif
+
+// =============================================================================
 // [3] FUNCIONES DE EEPROM
 // =============================================================================
 
@@ -159,7 +208,10 @@ static uint8_t leerBotones(void) {
     if (digitalRead(BTN_ABAJO)  == HIGH) mask |= 0x02;
     if (digitalRead(BTN_ACCION) == HIGH) mask |= 0x04;
 
-    if (mask != 0) tDebounce = tActual;
+    if (mask != 0) {
+        tDebounce = tActual;
+        DBG_VAL("[BTN] mask", mask);
+    }
     return mask;
 }
 
@@ -170,6 +222,12 @@ static uint8_t leerBotones(void) {
 static uint8_t calcularPeso7(uint16_t jackpot) {
     uint8_t peso = PESO_BASE_7 + (uint8_t)(jackpot / DIVISOR_JACKPOT);
     if (peso > PESO_MAX_7) peso = PESO_MAX_7;
+#ifdef DEBUG_SERIAL
+    Serial.print(F("[PROB] jackpot="));
+    Serial.print(jackpot);
+    Serial.print(F(" peso7="));
+    Serial.println(peso);
+#endif
     return peso;
 }
 
@@ -186,8 +244,12 @@ static uint8_t generarNumero(uint16_t jackpot) {
     uint16_t acumulado = 0;
     for (uint8_t i = 0; i < 7; i++) {
         acumulado += pesos[i];
-        if (r < acumulado) return i + 1;
+        if (r < acumulado) {
+            DBG_VAL("[GEN] numero", i + 1);
+            return i + 1;
+        }
     }
+    DBG("[GEN] numero=7 (fallback)");
     return 7;  // fallback, no debería alcanzarse
 }
 
@@ -268,16 +330,16 @@ static void mostrarResultado(void) {
         case PREMIO_JACKPOT:
             lcd.print(F("  ** JACKPOT!!! **  "));
             lcd.setCursor(0, 3);
-            snprintf(buf, sizeof(buf), "    Ganas: %u pts!", jackpotGanado);
+            snprintf(buf, sizeof(buf), "    Ganas: %u millones!", jackpotGanado);
             lcd.print(buf);
             break;
         case PREMIO_TRIPLE:
-            lcd.print(F("  TRIPLE! +20 pts   "));
+            lcd.print(F("  TRIPLE! +20 mil   "));
             lcd.setCursor(0, 3);
             lcd.print(F("===================="));
             break;
         case PREMIO_PAR_SEQ:
-            lcd.print(F("  PAR/SEQ! +5 pts   "));
+            lcd.print(F("  PAR o SEQ! +5 mil   "));
             lcd.setCursor(0, 3);
             lcd.print(F("===================="));
             break;
@@ -295,7 +357,7 @@ static void mostrarVerPremio(uint16_t jp) {
     lcd.setCursor(2, 0);
     lcd.print(F("PREMIO ACUMULADO"));
     char buf[12];
-    snprintf(buf, sizeof(buf), "JP: %u", jp);
+    snprintf(buf, sizeof(buf), "Jackpot: %u", jp);
     lcd.setCursor(6, 2);
     lcd.print(buf);
     lcd.setCursor(1, 3);
@@ -386,8 +448,8 @@ static void animarJackpot(void) {
 
 static void manejarStandby(void) {
     if (leerBotones() != 0) {
-        estadoActual = EST_MENU;
-        menuDirty    = true;
+        SET_ESTADO(EST_MENU);
+        menuDirty = true;
     }
 }
 
@@ -406,14 +468,14 @@ static void manejarMenu(void) {
             visuals[0] = visuals[1] = visuals[2] = 1;
             tGiroInicio  = millis();
             tUltimoFrame = millis();
-            estadoActual = EST_GIRANDO;
+            SET_ESTADO(EST_GIRANDO);
             iniciarPantallaGiro();
             actualizarTamboresLCD();
         } else if (menuSel == 1) {
-            estadoActual = EST_VER_PREMIO;
+            SET_ESTADO(EST_VER_PREMIO);
             mostrarVerPremio(leerJackpot());
         } else {
-            estadoActual = EST_STANDBY;
+            SET_ESTADO(EST_STANDBY);
             mostrarStandby();
         }
         return;
@@ -444,21 +506,24 @@ static void manejarGirando(void) {
     // Detener tambor 1 — el número real se genera en este momento
     if (!(tamboresDetenidos & 0x01) && elapsed >= TIEMPO_GIRO_T1) {
         tambores[0] = generarNumero(jackpotActual);
+        DBG_VAL("[GIRO] T1", tambores[0]);
         tamboresDetenidos |= 0x01;
         redraw = true;
     }
     // Detener tambor 2
     if (!(tamboresDetenidos & 0x02) && elapsed >= TIEMPO_GIRO_T2) {
         tambores[1] = generarNumero(jackpotActual);
+        DBG_VAL("[GIRO] T2", tambores[1]);
         tamboresDetenidos |= 0x02;
         redraw = true;
     }
     // Detener tambor 3 → pasar a evaluación
     if (!(tamboresDetenidos & 0x04) && elapsed >= TIEMPO_GIRO_T3) {
         tambores[2] = generarNumero(jackpotActual);
+        DBG_VAL("[GIRO] T3", tambores[2]);
         tamboresDetenidos |= 0x04;
         redraw = true;
-        estadoActual = EST_EVALUANDO;
+        SET_ESTADO(EST_EVALUANDO);
     }
 
     if (redraw) actualizarTamboresLCD();
@@ -470,6 +535,15 @@ static void manejarEvaluando(void) {
     tLedAnima        = millis();
     rgbFase          = 0;
 
+#ifdef DEBUG_SERIAL
+    Serial.print(F("[EVAL] Tambores: "));
+    Serial.print(tambores[0]); Serial.print(' ');
+    Serial.print(tambores[1]); Serial.print(' ');
+    Serial.println(tambores[2]);
+    Serial.print(F("[EVAL] Premio: "));
+    Serial.println(nombrePremio(ultimoPremio));
+#endif
+
     incrementarPartidas();
 
     switch (ultimoPremio) {
@@ -477,6 +551,7 @@ static void manejarEvaluando(void) {
             jackpotGanado = leerJackpot();
             jackpotActual = 0;
             guardarJackpot(0);
+            DBG_VAL("[EVAL] Jackpot ganado", jackpotGanado);
             iniciarMelodia(NOTAS_JACKPOT);
             break;
         case PREMIO_TRIPLE:
@@ -489,12 +564,13 @@ static void manejarEvaluando(void) {
         default:
             jackpotActual = leerJackpot() + 1;
             guardarJackpot(jackpotActual);
+            DBG_VAL("[EVAL] Jackpot nuevo", jackpotActual);
             iniciarMelodia(NOTAS_PERDER);
             break;
     }
 
     mostrarResultado();
-    estadoActual = EST_RESULTADO;
+    SET_ESTADO(EST_RESULTADO);
 }
 
 static void manejarResultado(void) {
@@ -507,15 +583,15 @@ static void manejarResultado(void) {
 
     if (millis() - tResultadoInicio >= TIEMPO_RESULTADO) {
         apagarFeedback();
-        estadoActual = EST_MENU;
-        menuDirty    = true;
+        SET_ESTADO(EST_MENU);
+        menuDirty = true;
     }
 }
 
 static void manejarVerPremio(void) {
     if (leerBotones() != 0) {
-        estadoActual = EST_MENU;
-        menuDirty    = true;
+        SET_ESTADO(EST_MENU);
+        menuDirty = true;
     }
 }
 
@@ -524,6 +600,10 @@ static void manejarVerPremio(void) {
 // =============================================================================
 
 void setup() {
+#ifdef DEBUG_SERIAL
+    Serial.begin(DEBUG_BAUD);
+    DBG("=== DEBUG SERIAL ACTIVO ===");
+#endif
     pinMode(BTN_ARRIBA, INPUT);  // pull-down externo
     pinMode(BTN_ABAJO,  INPUT);
     pinMode(BTN_ACCION, INPUT);
@@ -534,19 +614,26 @@ void setup() {
     pinMode(LED_RGB_G,    OUTPUT);  // A1
     pinMode(LED_RGB_B,    OUTPUT);  // A2
     pinMode(BUZZER,       OUTPUT);
-
     apagarFeedback();
 
+    // Test RGB al arranque: R → G → B, 400 ms por color
+    digitalWrite(LED_RGB_R, HIGH); delay(400); digitalWrite(LED_RGB_R, LOW);
+    digitalWrite(LED_RGB_G, HIGH); delay(400); digitalWrite(LED_RGB_G, LOW);
+    digitalWrite(LED_RGB_B, HIGH); delay(400); digitalWrite(LED_RGB_B, LOW);
+
+    delay(50);          // HD44780 necesita ≥40 ms tras power-on antes de recibir comandos
     lcd.init();
+    lcd.begin(20, 4);   // fuerza la inicialización del controlador explícitamente
     lcd.backlight();
 
     inicializarEEPROM();
     jackpotActual = leerJackpot();
+    DBG_VAL("[SETUP] Jackpot inicial", jackpotActual);
 
     // A3 flotante: ruido eléctrico como semilla (A4/A5 ocupados por I2C)
     randomSeed(analogRead(A3));
 
-    estadoActual = EST_MENU;
+    SET_ESTADO(EST_MENU);
     mostrarMenu(menuSel);
 }
 
