@@ -58,15 +58,33 @@ static constexpr uint8_t NUM_OPCIONES_MENU = 3;
 
 // Melodías en Flash: pares [frecuencia Hz, duración ms], {0,0} marca el fin.
 // PROGMEM evita que las constantes consuman SRAM.
-static const uint16_t PROGMEM NOTAS_PERDER[]  = {200, 200, 0, 0};
-static const uint16_t PROGMEM NOTAS_CHICO[]   = {440, 150, 554, 150, 659, 300, 0, 0};
-static const uint16_t PROGMEM NOTAS_GRANDE[]  = {523, 100, 587, 100, 659, 100,
-                                                  784, 100, 880, 300, 0, 0};
-static const uint16_t PROGMEM NOTAS_JACKPOT[] = {523, 100, 659, 100, 784, 100,
-                                                  1047, 150, 784, 100, 1047, 500, 0, 0};
+
+// Arpeggio ascendente al iniciar el giro (G6→B6→D7) — ×2 vs octava anterior
+static const uint16_t PROGMEM NOTAS_INICIO_GIRO[] = {
+    1568, 80, 1976, 80, 2350, 150, 0, 0
+};
+// Pérdida — tres notas descendentes (B5→F#5→B4)
+static const uint16_t PROGMEM NOTAS_PERDER[] = {
+    988, 150, 740, 150, 494, 350, 0, 0
+};
+// Par o secuencia (+5) — alegre ascendente (C6→E6→G6→C7)
+static const uint16_t PROGMEM NOTAS_CHICO[] = {
+    1047, 100, 1319, 100, 1568, 100, 2093, 300, 0, 0
+};
+// Triple (+20) — frase triunfal con eco (C6→E6→G6→C7→G6→C7→E7)
+static const uint16_t PROGMEM NOTAS_TRIPLE[] = {
+    1047, 80, 1319, 80, 1568, 80, 2093, 120,
+    1568, 80, 2093, 80, 2637, 400, 0, 0
+};
+// Jackpot — fanfarria épica de tres frases ascendentes
+static const uint16_t PROGMEM NOTAS_JACKPOT[] = {
+    1047, 80, 1319, 80, 1568, 80, 2093, 120,
+    1568, 80, 2093, 80, 2637, 150,
+    2093, 80, 2637, 80, 3136, 600, 0, 0
+};
 
 // Debug serie — descomenta la siguiente línea para activar la salida de diagnóstico
-#define DEBUG_SERIAL
+// #define DEBUG_SERIAL
 static constexpr uint32_t DEBUG_BAUD = 115200;
 
 #ifdef DEBUG_SERIAL
@@ -120,8 +138,9 @@ static uint32_t tLedAnima        = 0;
 static uint32_t tNotaInicio      = 0;
 
 // Estado de animación de feedback
-static uint8_t  notaIdx  = 0;  // índice del par [freq, dur] activo
-static uint8_t  rgbFase  = 0;  // 0=R, 1=G, 2=B para el ciclo jackpot
+static uint8_t              notaIdx      = 0;        // índice del par [freq, dur] activo
+static uint8_t              rgbFase      = 0;        // 0=R, 1=G, 2=B para el ciclo jackpot
+static const uint16_t*      melodiaActual = nullptr; // melodía PROGMEM en reproducción
 
 LiquidCrystal_I2C lcd(LCD_I2C_ADDR, 20, 4);
 
@@ -378,6 +397,7 @@ static void mostrarStandby(void) {
 
 static void apagarFeedback(void) {
     noTone(BUZZER);
+    melodiaActual = nullptr;
     digitalWrite(LED_VERDE,    LOW);
     digitalWrite(LED_AMARILLO, LOW);
     digitalWrite(LED_RGB_R,    LOW);
@@ -385,23 +405,27 @@ static void apagarFeedback(void) {
     digitalWrite(LED_RGB_B,    LOW);
 }
 
-// Inicia la reproducción del primer par [freq, dur] de una melodía PROGMEM.
+// Inicia la reproducción de una melodía PROGMEM; avanzarMelodia() la progresa
+// cada iteración del loop principal.
 static void iniciarMelodia(const uint16_t* notas) {
-    notaIdx     = 0;
-    tNotaInicio = millis();
+    melodiaActual = notas;
+    notaIdx       = 0;
+    tNotaInicio   = millis();
     uint16_t freq = pgm_read_word(&notas[0]);
     if (freq != 0) tone(BUZZER, freq);
 }
 
-// Avanza la melodía: cuando expira la duración de la nota actual, toca la siguiente.
-static void avanzarMelodia(const uint16_t* notas) {
-    uint16_t freq = pgm_read_word(&notas[notaIdx * 2]);
-    if (freq == 0) return;  // fin de melodía, nada que hacer
+// Avanza la melodía activa; llamar una vez por iteración de loop().
+// Es un no-op si no hay melodía activa o ya terminó.
+static void avanzarMelodia(void) {
+    if (melodiaActual == nullptr) return;
+    uint16_t freq = pgm_read_word(&melodiaActual[notaIdx * 2]);
+    if (freq == 0) return;
 
-    uint16_t dur = pgm_read_word(&notas[notaIdx * 2 + 1]);
+    uint16_t dur = pgm_read_word(&melodiaActual[notaIdx * 2 + 1]);
     if (millis() - tNotaInicio >= (uint32_t)dur) {
         notaIdx++;
-        uint16_t freqNext = pgm_read_word(&notas[notaIdx * 2]);
+        uint16_t freqNext = pgm_read_word(&melodiaActual[notaIdx * 2]);
         if (freqNext != 0) {
             tone(BUZZER, freqNext);
         } else {
@@ -411,23 +435,34 @@ static void avanzarMelodia(const uint16_t* notas) {
     }
 }
 
+// true mientras haya una nota activa en la melodía actual.
+static bool melodiaActiva(void) {
+    if (melodiaActual == nullptr) return false;
+    return pgm_read_word(&melodiaActual[notaIdx * 2]) != 0;
+}
+
+// Reproduce un tono corto de evento solo si no hay melodía en curso,
+// evitando interrumpir fanfarrias de premio. tone() con duración es no bloqueante.
+static void sonarBeep(uint16_t freq, uint16_t dur) {
+    if (!melodiaActiva()) tone(BUZZER, freq, dur);
+}
+
+// --- Animaciones de resultado (solo LEDs; melodía avanza en loop) ---
+
 static void animarPerdida(void) {
-    avanzarMelodia(NOTAS_PERDER);
-    // LEDs permanecen apagados (ya estaban apagados al entrar a RESULTADO)
+    // LEDs permanecen apagados
 }
 
 static void animarPremioChico(void) {
     digitalWrite(LED_VERDE, HIGH);
-    avanzarMelodia(NOTAS_CHICO);
 }
 
-static void animarPremioGrande(void) {
+static void animarPremioTriple(void) {
     uint32_t tActual = millis();
     if (tActual - tLedAnima >= 200UL) {
         tLedAnima = tActual;
         digitalWrite(LED_AMARILLO, !digitalRead(LED_AMARILLO));
     }
-    avanzarMelodia(NOTAS_GRANDE);
 }
 
 static void animarJackpot(void) {
@@ -439,7 +474,6 @@ static void animarJackpot(void) {
         digitalWrite(LED_RGB_B, rgbFase == 2 ? HIGH : LOW);
         rgbFase = (rgbFase + 1) % 3;
     }
-    avanzarMelodia(NOTAS_JACKPOT);
 }
 
 // =============================================================================
@@ -457,17 +491,21 @@ static void manejarMenu(void) {
     uint8_t btn = leerBotones();
 
     if (btn & 0x01) {  // ARRIBA — cursor circular
+        sonarBeep(1760, 40);
         menuSel   = (menuSel == 0) ? NUM_OPCIONES_MENU - 1 : menuSel - 1;
         menuDirty = true;
     } else if (btn & 0x02) {  // ABAJO — cursor circular
+        sonarBeep(1320, 40);
         menuSel   = (menuSel + 1) % NUM_OPCIONES_MENU;
         menuDirty = true;
     } else if (btn & 0x04) {  // ACCION — seleccionar opción
+        sonarBeep(2093, 60);
         if (menuSel == 0) {
             tamboresDetenidos        = 0;
             visuals[0] = visuals[1] = visuals[2] = 1;
             tGiroInicio  = millis();
             tUltimoFrame = millis();
+            iniciarMelodia(NOTAS_INICIO_GIRO);
             SET_ESTADO(EST_GIRANDO);
             iniciarPantallaGiro();
             actualizarTamboresLCD();
@@ -475,6 +513,7 @@ static void manejarMenu(void) {
             SET_ESTADO(EST_VER_PREMIO);
             mostrarVerPremio(leerJackpot());
         } else {
+            sonarBeep(1320, 200);
             SET_ESTADO(EST_STANDBY);
             mostrarStandby();
         }
@@ -500,6 +539,8 @@ static void manejarGirando(void) {
                 visuals[i] = (uint8_t)random(1L, 8L);
             }
         }
+        // Click mecánico de rodillo solo mientras queden tambores girando
+        if (tamboresDetenidos != 0x07) sonarBeep(2000, 20);
         redraw = true;
     }
 
@@ -507,6 +548,7 @@ static void manejarGirando(void) {
     if (!(tamboresDetenidos & 0x01) && elapsed >= TIEMPO_GIRO_T1) {
         tambores[0] = generarNumero(jackpotActual);
         DBG_VAL("[GIRO] T1", tambores[0]);
+        tone(BUZZER, 2400, 70);  // click de parada, siempre audible
         tamboresDetenidos |= 0x01;
         redraw = true;
     }
@@ -514,6 +556,7 @@ static void manejarGirando(void) {
     if (!(tamboresDetenidos & 0x02) && elapsed >= TIEMPO_GIRO_T2) {
         tambores[1] = generarNumero(jackpotActual);
         DBG_VAL("[GIRO] T2", tambores[1]);
+        tone(BUZZER, 3200, 70);
         tamboresDetenidos |= 0x02;
         redraw = true;
     }
@@ -521,6 +564,7 @@ static void manejarGirando(void) {
     if (!(tamboresDetenidos & 0x04) && elapsed >= TIEMPO_GIRO_T3) {
         tambores[2] = generarNumero(jackpotActual);
         DBG_VAL("[GIRO] T3", tambores[2]);
+        tone(BUZZER, 4000, 100);  // pitch más alto: anticipación
         tamboresDetenidos |= 0x04;
         redraw = true;
         SET_ESTADO(EST_EVALUANDO);
@@ -555,7 +599,7 @@ static void manejarEvaluando(void) {
             iniciarMelodia(NOTAS_JACKPOT);
             break;
         case PREMIO_TRIPLE:
-            iniciarMelodia(NOTAS_GRANDE);
+            iniciarMelodia(NOTAS_TRIPLE);
             break;
         case PREMIO_PAR_SEQ:
             iniciarMelodia(NOTAS_CHICO);
@@ -576,9 +620,9 @@ static void manejarEvaluando(void) {
 static void manejarResultado(void) {
     switch (ultimoPremio) {
         case PREMIO_JACKPOT:  animarJackpot();      break;
-        case PREMIO_TRIPLE:   animarPremioGrande(); break;
+        case PREMIO_TRIPLE:   animarPremioTriple(); break;
         case PREMIO_PAR_SEQ:  animarPremioChico();  break;
-        case PREMIO_NINGUNO:  animarPerdida();       break;
+        case PREMIO_NINGUNO:  animarPerdida();      break;
     }
 
     if (millis() - tResultadoInicio >= TIEMPO_RESULTADO) {
@@ -642,6 +686,7 @@ void setup() {
 // =============================================================================
 
 void loop() {
+    avanzarMelodia();  // avanza la melodía activa en cada iteración, independiente del estado
     switch (estadoActual) {
         case EST_STANDBY:    manejarStandby();   break;
         case EST_MENU:       manejarMenu();      break;
