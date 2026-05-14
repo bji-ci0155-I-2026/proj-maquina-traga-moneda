@@ -8,6 +8,8 @@
 
 Este proyecto implementa una máquina traga-monedas digital sobre un Arduino UNO R3 (ATmega328P). El sistema simula tres "tambores" virtuales que giran y se detienen mostrando números del 1 al 7 en un LCD 2004. El jugador interactúa mediante botones físicos, y el sistema mantiene un premio acumulado (jackpot) persistente en EEPROM que crece con cada partida perdida.
 
+**Alcance del documento:** La mayor parte de este README describe la implementación pensada para el Arduino físico (`jackpot.ino`). La versión de simulación (`jackpot-simulide.ino`) conserva la lógica general de tambores, jackpot, EEPROM y probabilidades, pero fue modificada para agregar saldo persistente, apuesta ajustable y premios calculados como multiplicadores de la apuesta.
+
 ---
 
 ## 2. Reglas del Juego
@@ -26,11 +28,18 @@ Cada tambor genera un número aleatorio entre 1 y 7. Los números del 1 al 6 tie
 | Tres sietes | 7-7-7 | JACKPOT | Valor acumulado |
 | Cualquier otra cosa | 1-3-6, 2-5-1 | Sin premio | 0 puntos |
 
-**Nota:** Los premios pequeño y grande son valores fijos e independientes del jackpot acumulado. Solo el 7-7-7 otorga el jackpot.
+**Nota para el código físico:** Los premios pequeño y grande son valores fijos e independientes del jackpot acumulado. Solo el 7-7-7 otorga el jackpot.
+
+**Diferencia en la simulación:** En `jackpot-simulide.ino`, los premios ya no son valores fijos. Antes de girar se descuenta una apuesta del saldo del jugador, y las ganancias se calculan como multiplicadores de esa apuesta:
+- Par o secuencia: `apuesta x 2`
+- Triple: `apuesta x 5`
+- Jackpot: `apuesta x 20 + jackpot acumulado`
 
 ### 2.3 Detección de Secuencias
 
-Una "secuencia consecutiva" se define como tres números que forman una escalera ascendente (diferencia de +1 entre cada par consecutivo). Para detectarla, se ordenan los tres tambores y se verifica que formen una escalera. Esto significa que 3-1-2 también cuenta como secuencia (es 1-2-3 desordenado).
+En el código físico, una "secuencia consecutiva" se define como tres números que forman una escalera ascendente (diferencia de +1 entre cada par consecutivo). Para detectarla, se ordenan los tres tambores y se verifica que formen una escalera. Esto significa que 3-1-2 también cuenta como secuencia (es 1-2-3 desordenado).
+
+**Diferencia en la simulación:** En `jackpot-simulide.ino` se cambió esta lógica para que solo cuenten las secuencias que salen en orden exacto: 1-2-3, 2-3-4, 3-4-5, 4-5-6 y 5-6-7. Combinaciones desordenadas como 3-1-2 o 3-2-1 ya no se consideran secuencia.
 
 **Decisión de diseño:** Se evalúa en este orden de prioridad (de mayor a menor):
 1. Jackpot (7-7-7) — verificar primero porque también sería "tres iguales"
@@ -46,6 +55,8 @@ El jackpot es un contador persistente almacenado en EEPROM que sigue estas regla
 - Cada vez que un jugador juega y NO gana ningún premio, el jackpot se incrementa en 1.
 - Si alguien gana el jackpot (7-7-7), el acumulado se resetea a 0.
 - Los premios pequeños y grandes NO afectan el jackpot (no lo resetean ni lo reducen).
+
+**Diferencia en la simulación:** El jackpot sigue aumentando con las pérdidas y se sigue reseteando cuando sale 7-7-7, pero además se suma al pago final del jugador. Por ejemplo, si la apuesta es 5 y el jackpot acumulado es 37, el pago por jackpot sería `5 x 20 + 37 = 137`.
 
 ### 2.5 Probabilidad Dinámica del 7
 
@@ -141,6 +152,8 @@ El sistema se modela como una máquina de estados finita (FSM) con 6 estados:
 ====================
 ```
 El cursor `>` se mueve entre las opciones. El LCD 2004 de 20x4 caracteres permite mostrar las tres opciones a la vez con un título.
+
+En la versión de simulación, el menú se amplió para incluir el ajuste de apuesta y la consulta del saldo. La opción de saldo también permite recargar el saldo inicial durante pruebas en SimulIDE.
 
 **GIRANDO:** Animación de los tres tambores. Cada tambor "gira" mostrando números cambiantes rápidamente, y se detiene de izquierda a derecha con un retardo entre cada uno (simula el efecto mecánico de una máquina real). La animación utiliza `millis()` para temporización no bloqueante.
 
@@ -282,6 +295,8 @@ Dirección 0x04-0x07: Total de partidas jugadas (uint32_t, 4 bytes)
 Total usado: 8 bytes de 1024 disponibles.
 ```
 
+**Diferencia en la simulación:** El layout de EEPROM se amplió para guardar también el saldo del jugador. En esa versión, además del jackpot y el contador de partidas, se guarda un `uint16_t` de saldo en EEPROM. El saldo inicial es 100 créditos y se actualiza cada vez que se cobra una apuesta o se paga un premio. También se usa una firma de validación distinta para reinicializar correctamente este layout extendido.
+
 ### 6.2 Protección contra Desgaste
 
 La EEPROM tiene un límite de ~100,000 ciclos de escritura por celda. Para mitigar esto:
@@ -313,6 +328,7 @@ función inicializarEEPROM():
 - Arduino IDE maneja archivos múltiples de forma peculiar (los concatena).
 - Para un proyecto de este tamaño (~300-500 líneas estimadas), un solo archivo con buena organización es más simple de navegar y depurar.
 - SimulIDE trabaja mejor con archivo único.
+- La versión de simulación agrega estados/pantallas para ajustar apuesta y ver saldo, pero mantiene la misma idea de organización por secciones.
 
 ### 7.2 Organización del Archivo
 
@@ -518,9 +534,11 @@ Muy holgado también.
 
 9. **Polling de botones sin interrupciones:** Simplifica el código. El `loop()` no tiene `delay()`, así que el polling es suficientemente responsivo.
 
-10. **Premios fijos independientes del jackpot:** Solo el 7-7-7 otorga y resetea el acumulado. Los demás premios son valores constantes.
+10. **Premios fijos independientes del jackpot en el código físico:** Solo el 7-7-7 otorga y resetea el acumulado. Los demás premios son valores constantes. En la simulación, este criterio se adaptó para usar saldo, apuesta ajustable y multiplicadores de apuesta.
 
 11. **Tope máximo en el peso del 7:** Se limita a `PESO_MAX_7` para que el 7 nunca tenga más del ~40% de probabilidad por tambor, manteniendo el juego interesante.
+
+12. **Saldo y apuesta en simulación:** La versión de SimulIDE agrega un saldo persistente en EEPROM, permite ajustar la apuesta y calcula los premios como `apuesta x multiplicador`. El jackpot paga `apuesta x 20 + jackpot acumulado`.
 
 ---
 
@@ -535,9 +553,15 @@ static constexpr uint8_t  PESO_BASE_7      = 3;    // Peso base del 7
 static constexpr uint8_t  PESO_MAX_7       = 40;   // Peso máximo del 7
 static constexpr uint8_t  DIVISOR_JACKPOT  = 5;    // Cuánto jackpot se necesita para +1 de peso al 7
 
-// Premios
+// Premios del código físico
 static constexpr uint8_t  PREMIO_CHICO     = 5;    // Puntos por secuencia o par
 static constexpr uint8_t  PREMIO_GRANDE    = 20;   // Puntos por triple (no 7)
+
+// En la simulación, estos valores se reemplazan por:
+// SALDO_INICIAL = 100
+// APUESTA_MIN = 1, APUESTA_MAX = 50, APUESTA_PASO = 1
+// MULT_PAR_SEQ = 2, MULT_TRIPLE = 5, MULT_JACKPOT = 20
+// Pago jackpot = apuesta * MULT_JACKPOT + jackpot acumulado
 
 // Tiempos (ms)
 static constexpr uint16_t TIEMPO_GIRO_T1   = 1000; // Duración giro tambor 1

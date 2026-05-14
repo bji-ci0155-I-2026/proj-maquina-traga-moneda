@@ -6,8 +6,8 @@
 // =============================================================================
 // [1] INCLUDES Y CONSTANTES
 // =============================================================================
-//#include <LiquidCrystal_I2C.h>  // "LiquidCrystal I2C" by Frank de Brabander
-#include <LiquidCrystal_AIP31068_I2C.h> // LiquidCrysta1_AlP31068 by Andriy Golovnya
+
+#include <LiquidCrystal_AIP31068_I2C.h> // LiquidCrystal_AIP31068 by Andriy Golovnya
 #include <EEPROM.h>
 #include <avr/pgmspace.h>
 
@@ -31,11 +31,12 @@ static constexpr uint8_t LED_RGB_B    = A2;
 // Buzzer pasivo
 static constexpr uint8_t BUZZER = 13;
 
-// EEPROM — layout de 8 bytes (total disponible: 1024)
-static constexpr uint16_t EEPROM_FIRMA_ADDR    = 0x00;  // uint16_t, firma 0xCAFE
-static constexpr uint16_t EEPROM_JACKPOT_ADDR  = 0x02;  // uint16_t, acumulado
+// EEPROM — layout de 10 bytes (total disponible: 1024)
+static constexpr uint16_t EEPROM_FIRMA_ADDR    = 0x00;  // uint16_t, firma de versión
+static constexpr uint16_t EEPROM_JACKPOT_ADDR  = 0x02;  // uint16_t, acumulado para ajustar probabilidades
 static constexpr uint16_t EEPROM_PARTIDAS_ADDR = 0x04;  // uint32_t, contador total
-static constexpr uint16_t EEPROM_FIRMA_VAL     = 0xCAFE;
+static constexpr uint16_t EEPROM_SALDO_ADDR    = 0x08;  // uint16_t, créditos disponibles
+static constexpr uint16_t EEPROM_FIRMA_VAL     = 0xC0DE; // cambia para reinicializar el nuevo layout
 
 // Pesos de probabilidad — aritmética 100% entera, sin float
 static constexpr uint8_t PESO_NUM_1_6    = 10;
@@ -43,9 +44,18 @@ static constexpr uint8_t PESO_BASE_7     = 3;
 static constexpr uint8_t PESO_MAX_7      = 40;
 static constexpr uint8_t DIVISOR_JACKPOT = 5;
 
-// Premios fijos (puntos)
-static constexpr uint8_t PREMIO_CHICO  = 5;
-static constexpr uint8_t PREMIO_GRANDE = 20;
+// Saldo y apuestas
+static constexpr uint16_t SALDO_INICIAL = 100;
+static constexpr uint16_t SALDO_MAXIMO  = 999;
+static constexpr uint8_t  APUESTA_MIN   = 1;
+static constexpr uint8_t  APUESTA_MAX   = 50;
+static constexpr uint8_t  APUESTA_PASO  = 1;
+
+// Premios como multiplicadores de la apuesta.
+// En jackpot se paga: apuesta * MULT_JACKPOT + jackpot acumulado.
+static constexpr uint8_t MULT_PAR_SEQ  = 2;
+static constexpr uint8_t MULT_TRIPLE   = 5;
+static constexpr uint8_t MULT_JACKPOT  = 20;
 
 // Tiempos (ms) — toda temporización vía millis(), nunca delay()
 static constexpr uint16_t TIEMPO_GIRO_T1   = 1000;
@@ -56,7 +66,7 @@ static constexpr uint16_t TIEMPO_RESULTADO = 3000;
 static constexpr uint16_t DEBOUNCE_MS      = 200;
 
 // Número de opciones del menú
-static constexpr uint8_t NUM_OPCIONES_MENU = 3;
+static constexpr uint8_t NUM_OPCIONES_MENU = 4;
 
 // Melodías en Flash: pares [frecuencia Hz, duración ms], {0,0} marca el fin.
 // PROGMEM evita que las constantes consuman SRAM.
@@ -104,10 +114,11 @@ static constexpr uint32_t DEBUG_BAUD = 115200;
 enum Estado : uint8_t {
     EST_STANDBY,
     EST_MENU,
+    EST_AJUSTAR_APUESTA,
     EST_GIRANDO,
     EST_EVALUANDO,
     EST_RESULTADO,
-    EST_VER_PREMIO
+    EST_VER_SALDO
 };
 
 enum TipoPremio : uint8_t {
@@ -122,10 +133,15 @@ static uint8_t    menuSel       = 0;        // 0=Jugar, 1=Ver Premio, 2=Salir
 static bool       menuDirty     = true;
 
 // Resultados de la jugada actual
-static uint8_t    tambores[3]   = {0, 0, 0};
-static TipoPremio ultimoPremio  = PREMIO_NINGUNO;
-static uint16_t   jackpotActual = 0;
-static uint16_t   jackpotGanado = 0;  // valor capturado al ganar el jackpot
+static uint8_t    tambores[3]       = {0, 0, 0};
+static TipoPremio ultimoPremio      = PREMIO_NINGUNO;
+static uint16_t   jackpotActual     = 0;
+static uint16_t   jackpotGanado     = 0;  // valor capturado al ganar el jackpot
+static uint16_t   saldoActual       = 0;
+static uint8_t    apuestaActual     = 5;
+static uint8_t    apuestaDeJugada   = 5;
+static uint8_t    multiplicadorPago = 0;
+static uint16_t   gananciaActual    = 0;
 
 // Animación de giro
 static uint8_t    visuals[3]          = {1, 1, 1};  // números cosméticos en pantalla
@@ -144,8 +160,8 @@ static uint8_t              notaIdx      = 0;        // índice del par [freq, d
 static uint8_t              rgbFase      = 0;        // 0=R, 1=G, 2=B para el ciclo jackpot
 static const uint16_t*      melodiaActual = nullptr; // melodía PROGMEM en reproducción
 
-//LiquidCrystal_I2C lcd(LCD_I2C_ADDR, 20, 4);
 LiquidCrystal_AIP31068_I2C lcd(LCD_I2C_ADDR, 20, 4);
+
 
 // =============================================================================
 // [2b] HELPERS DE DEBUG (solo se compilan con DEBUG_SERIAL activo)
@@ -156,10 +172,11 @@ static const __FlashStringHelper* nombreEstado(Estado e) {
     switch(e) {
         case EST_STANDBY:    return F("STANDBY");
         case EST_MENU:       return F("MENU");
+        case EST_AJUSTAR_APUESTA: return F("AJUSTAR_APUESTA");
         case EST_GIRANDO:    return F("GIRANDO");
         case EST_EVALUANDO:  return F("EVALUANDO");
         case EST_RESULTADO:  return F("RESULTADO");
-        case EST_VER_PREMIO: return F("VER_PREMIO");
+        case EST_VER_SALDO:  return F("VER_SALDO");
         default:             return F("?");
     }
 }
@@ -195,6 +212,7 @@ static void inicializarEEPROM(void) {
         EEPROM.put(EEPROM_FIRMA_ADDR,    (uint16_t)EEPROM_FIRMA_VAL);
         EEPROM.put(EEPROM_JACKPOT_ADDR,  (uint16_t)0);
         EEPROM.put(EEPROM_PARTIDAS_ADDR, (uint32_t)0);
+        EEPROM.put(EEPROM_SALDO_ADDR,    (uint16_t)SALDO_INICIAL);
     }
 }
 
@@ -206,6 +224,33 @@ static uint16_t leerJackpot(void) {
 
 static void guardarJackpot(uint16_t val) {
     EEPROM.put(EEPROM_JACKPOT_ADDR, val);  // put() usa update() internamente
+}
+
+static uint16_t leerSaldo(void) {
+    uint16_t val = 0;
+    EEPROM.get(EEPROM_SALDO_ADDR, val);
+    if (val > SALDO_MAXIMO) val = SALDO_INICIAL;  // protección por si la EEPROM tiene basura
+    return val;
+}
+
+static void guardarSaldo(uint16_t val) {
+    if (val > SALDO_MAXIMO) val = SALDO_MAXIMO;
+    EEPROM.put(EEPROM_SALDO_ADDR, val);
+    saldoActual = val;
+}
+
+static void recargarSaldoInicial(void) {
+    guardarSaldo(SALDO_INICIAL);
+}
+
+static uint8_t limitarApuesta(uint16_t apuesta) {
+    uint16_t saldo = leerSaldo();
+    uint16_t maxPermitido = (saldo < APUESTA_MAX) ? saldo : APUESTA_MAX;
+    if (maxPermitido < APUESTA_MIN) maxPermitido = APUESTA_MIN;
+
+    if (apuesta < APUESTA_MIN) return APUESTA_MIN;
+    if (apuesta > maxPermitido) return (uint8_t)maxPermitido;
+    return (uint8_t)apuesta;
 }
 
 static void incrementarPartidas(void) {
@@ -283,12 +328,9 @@ static TipoPremio evaluarPremio(uint8_t a, uint8_t b, uint8_t c) {
     // 2. Triple (no 7)
     if (a == b && b == c) return PREMIO_TRIPLE;
 
-    // 3. Secuencia: ordenar con bubble sort de 3 elementos y verificar escalera
-    uint8_t s[3] = {a, b, c};
-    if (s[0] > s[1]) { uint8_t t = s[0]; s[0] = s[1]; s[1] = t; }
-    if (s[1] > s[2]) { uint8_t t = s[1]; s[1] = s[2]; s[2] = t; }
-    if (s[0] > s[1]) { uint8_t t = s[0]; s[0] = s[1]; s[1] = t; }
-    if (s[1] - s[0] == 1 && s[2] - s[1] == 1) return PREMIO_PAR_SEQ;
+    // 3. Secuencia EN ORDEN: solo cuenta 1-2-3, 2-3-4, ..., 5-6-7.
+    // No se ordenan los números, por lo que 1-3-2, 3-2-1, etc. NO cuentan.
+    if (b == a + 1 && c == b + 1) return PREMIO_PAR_SEQ;
 
     // 4. Par
     if (a == b || b == c || a == c) return PREMIO_PAR_SEQ;
@@ -302,25 +344,61 @@ static TipoPremio evaluarPremio(uint8_t a, uint8_t b, uint8_t c) {
 
 static void mostrarMenu(uint8_t sel) {
     lcd.clear();
-    lcd.setCursor(3, 0);
-    lcd.print(F("TRAGA-MONEDAS"));
+    char buf[21];
+    saldoActual = leerSaldo();
+    apuestaActual = limitarApuesta(apuestaActual);
+
+    lcd.setCursor(0, 0);
+    snprintf(buf, sizeof(buf), "%cJugar  A:%u", sel == 0 ? '>' : ' ', apuestaActual);
+    lcd.print(buf);
+
     lcd.setCursor(0, 1);
-    lcd.print(sel == 0 ? F("> Jugar     ") : F("  Jugar     "));
+    lcd.print(sel == 1 ? F(">Ajustar apuesta") : F(" Ajustar apuesta"));
+
     lcd.setCursor(0, 2);
-    lcd.print(sel == 1 ? F("> Ver Premio") : F("  Ver Premio"));
+    snprintf(buf, sizeof(buf), "%cSaldo: %u", sel == 2 ? '>' : ' ', saldoActual);
+    lcd.print(buf);
+
     lcd.setCursor(0, 3);
-    lcd.print(sel == 2 ? F("> Salir     ") : F("  Salir     "));
+    lcd.print(sel == 3 ? F(">Salir") : F(" Salir"));
+}
+
+static void mostrarAjustarApuesta(void) {
+    lcd.clear();
+    char buf[21];
+    saldoActual = leerSaldo();
+    apuestaActual = limitarApuesta(apuestaActual);
+
+    lcd.setCursor(0, 0);
+    lcd.print(F("AJUSTAR APUESTA"));
+
+    lcd.setCursor(0, 1);
+    snprintf(buf, sizeof(buf), "Apuesta: %u", apuestaActual);
+    lcd.print(buf);
+
+    lcd.setCursor(0, 2);
+    snprintf(buf, sizeof(buf), "Saldo: %u", saldoActual);
+    lcd.print(buf);
+
+    lcd.setCursor(0, 3);
+    lcd.print(F("Arr/Abj  OK=volver"));
 }
 
 // Dibuja la pantalla estática del giro (llamar una sola vez al entrar al estado).
 static void iniciarPantallaGiro(void) {
     lcd.clear();
+    char buf[21];
+
     lcd.setCursor(0, 0);
-    lcd.print(F("===================="));
+    snprintf(buf, sizeof(buf), "Apuesta:%u", apuestaDeJugada);
+    lcd.print(buf);
+
     lcd.setCursor(4, 1);
     lcd.print(F("GIRANDO..."));
+
     lcd.setCursor(0, 3);
-    lcd.print(F("===================="));
+    snprintf(buf, sizeof(buf), "Saldo:%u", saldoActual);
+    lcd.print(buf);
 }
 
 // Actualiza solo la línea de los tambores (línea 2) para minimizar tráfico I2C.
@@ -338,52 +416,64 @@ static void actualizarTamboresLCD(void) {
 
 static void mostrarResultado(void) {
     lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(F("===================="));
-
     char buf[21];
-    snprintf(buf, sizeof(buf), "    [%u]  [%u]  [%u]   ",
-             tambores[0], tambores[1], tambores[2]);
-    lcd.setCursor(0, 1);
+
+    snprintf(buf, sizeof(buf), "[%u] [%u] [%u]", tambores[0], tambores[1], tambores[2]);
+    lcd.setCursor(0, 0);
     lcd.print(buf);
 
-    lcd.setCursor(0, 2);
+    lcd.setCursor(0, 1);
     switch (ultimoPremio) {
         case PREMIO_JACKPOT:
-            lcd.print(F("  ** JACKPOT!!! **  "));
-            lcd.setCursor(0, 3);
-            snprintf(buf, sizeof(buf), "    Ganas: %u millones!", jackpotGanado);
-            lcd.print(buf);
+            lcd.print(F("JACKPOT! x20+JP"));
             break;
         case PREMIO_TRIPLE:
-            lcd.print(F("  TRIPLE! +20 mil   "));
-            lcd.setCursor(0, 3);
-            lcd.print(F("===================="));
+            lcd.print(F("TRIPLE! x5"));
             break;
         case PREMIO_PAR_SEQ:
-            lcd.print(F("  PAR o SEQ! +5 mil   "));
-            lcd.setCursor(0, 3);
-            lcd.print(F("===================="));
+            lcd.print(F("PAR/SEQ! x2"));
             break;
         case PREMIO_NINGUNO:
         default:
-            lcd.print(F("   Sin premio  :(   "));
-            lcd.setCursor(0, 3);
-            lcd.print(F("===================="));
+            lcd.print(F("Sin premio"));
             break;
     }
+
+    lcd.setCursor(0, 2);
+    if (multiplicadorPago > 0) {
+        snprintf(buf, sizeof(buf), "Pago: %u", gananciaActual);
+    } else {
+        snprintf(buf, sizeof(buf), "Pierde: %u", apuestaDeJugada);
+    }
+    lcd.print(buf);
+
+    lcd.setCursor(0, 3);
+    snprintf(buf, sizeof(buf), "Saldo: %u", saldoActual);
+    lcd.print(buf);
 }
 
-static void mostrarVerPremio(uint16_t jp) {
+static void mostrarSaldo(bool saldoInsuficiente = false) {
     lcd.clear();
-    lcd.setCursor(2, 0);
-    lcd.print(F("PREMIO ACUMULADO"));
-    char buf[12];
-    snprintf(buf, sizeof(buf), "Jackpot: %u", jp);
-    lcd.setCursor(6, 2);
+    char buf[21];
+    saldoActual = leerSaldo();
+
+    lcd.setCursor(0, 0);
+    if (saldoInsuficiente) {
+        lcd.print(F("SALDO INSUFICIENTE"));
+    } else {
+        lcd.print(F("SALDO Y JACKPOT"));
+    }
+
+    lcd.setCursor(0, 1);
+    snprintf(buf, sizeof(buf), "Saldo: %u", saldoActual);
     lcd.print(buf);
-    lcd.setCursor(1, 3);
-    lcd.print(F("[Presione un boton]"));
+
+    lcd.setCursor(0, 2);
+    snprintf(buf, sizeof(buf), "A:%u  JP:%u", apuestaActual, leerJackpot());
+    lcd.print(buf);
+
+    lcd.setCursor(0, 3);
+    lcd.print(F("OK=volver Arr=100"));
 }
 
 static void mostrarStandby(void) {
@@ -504,6 +594,19 @@ static void manejarMenu(void) {
     } else if (btn & 0x04) {  // ACCION — seleccionar opción
         sonarBeep(2093, 60);
         if (menuSel == 0) {
+            saldoActual = leerSaldo();
+            apuestaActual = limitarApuesta(apuestaActual);
+
+            if (saldoActual < apuestaActual) {
+                SET_ESTADO(EST_VER_SALDO);
+                mostrarSaldo(true);
+                return;
+            }
+
+            apuestaDeJugada = apuestaActual;
+            guardarSaldo(saldoActual - apuestaDeJugada);  // se cobra la apuesta antes de girar
+            jackpotActual = leerJackpot();
+
             tamboresDetenidos        = 0;
             visuals[0] = visuals[1] = visuals[2] = 1;
             tGiroInicio  = millis();
@@ -513,8 +616,11 @@ static void manejarMenu(void) {
             iniciarPantallaGiro();
             actualizarTamboresLCD();
         } else if (menuSel == 1) {
-            SET_ESTADO(EST_VER_PREMIO);
-            mostrarVerPremio(leerJackpot());
+            SET_ESTADO(EST_AJUSTAR_APUESTA);
+            mostrarAjustarApuesta();
+        } else if (menuSel == 2) {
+            SET_ESTADO(EST_VER_SALDO);
+            mostrarSaldo(false);
         } else {
             sonarBeep(1320, 200);
             SET_ESTADO(EST_STANDBY);
@@ -526,6 +632,26 @@ static void manejarMenu(void) {
     if (menuDirty) {
         mostrarMenu(menuSel);
         menuDirty = false;
+    }
+}
+
+static void manejarAjustarApuesta(void) {
+    uint8_t btn = leerBotones();
+    if (btn == 0) return;
+
+    if (btn & 0x01) {  // ARRIBA — subir apuesta
+        sonarBeep(1760, 40);
+        apuestaActual = limitarApuesta((uint16_t)apuestaActual + APUESTA_PASO);
+        mostrarAjustarApuesta();
+    } else if (btn & 0x02) {  // ABAJO — bajar apuesta
+        sonarBeep(1320, 40);
+        if (apuestaActual > APUESTA_MIN) apuestaActual -= APUESTA_PASO;
+        apuestaActual = limitarApuesta(apuestaActual);
+        mostrarAjustarApuesta();
+    } else if (btn & 0x04) {  // ACCION — volver al menú
+        sonarBeep(2093, 60);
+        SET_ESTADO(EST_MENU);
+        menuDirty = true;
     }
 }
 
@@ -593,18 +719,24 @@ static void manejarEvaluando(void) {
 
     incrementarPartidas();
 
+    multiplicadorPago = 0;
+    gananciaActual = 0;
+
     switch (ultimoPremio) {
         case PREMIO_JACKPOT:
             jackpotGanado = leerJackpot();
             jackpotActual = 0;
             guardarJackpot(0);
-            DBG_VAL("[EVAL] Jackpot ganado", jackpotGanado);
+            multiplicadorPago = MULT_JACKPOT;
             iniciarMelodia(NOTAS_JACKPOT);
+            DBG_VAL("[EVAL] Jackpot ganado", jackpotGanado);
             break;
         case PREMIO_TRIPLE:
+            multiplicadorPago = MULT_TRIPLE;
             iniciarMelodia(NOTAS_TRIPLE);
             break;
         case PREMIO_PAR_SEQ:
+            multiplicadorPago = MULT_PAR_SEQ;
             iniciarMelodia(NOTAS_CHICO);
             break;
         case PREMIO_NINGUNO:
@@ -614,6 +746,22 @@ static void manejarEvaluando(void) {
             DBG_VAL("[EVAL] Jackpot nuevo", jackpotActual);
             iniciarMelodia(NOTAS_PERDER);
             break;
+    }
+
+    if (multiplicadorPago > 0) {
+        // Pago base: apuesta x multiplicador.
+        gananciaActual = (uint16_t)apuestaDeJugada * multiplicadorPago;
+
+        // Si fue jackpot, además se entrega el acumulado guardado en EEPROM.
+        // Ejemplo: apuesta 5, x20 y jackpot acumulado 37 => 5*20 + 37 = 137.
+        if (ultimoPremio == PREMIO_JACKPOT) {
+            gananciaActual += jackpotGanado;
+        }
+
+        saldoActual = leerSaldo();
+        guardarSaldo(saldoActual + gananciaActual);
+    } else {
+        saldoActual = leerSaldo();
     }
 
     mostrarResultado();
@@ -635,11 +783,20 @@ static void manejarResultado(void) {
     }
 }
 
-static void manejarVerPremio(void) {
-    if (leerBotones() != 0) {
-        SET_ESTADO(EST_MENU);
-        menuDirty = true;
+static void manejarVerSaldo(void) {
+    uint8_t btn = leerBotones();
+    if (btn == 0) return;
+
+    if (btn & 0x01) {  // ARRIBA — recargar saldo para pruebas de simulación
+        sonarBeep(1760, 60);
+        recargarSaldoInicial();
+        apuestaActual = limitarApuesta(apuestaActual);
+        mostrarSaldo(false);
+        return;
     }
+
+    SET_ESTADO(EST_MENU);
+    menuDirty = true;
 }
 
 // =============================================================================
@@ -670,12 +827,15 @@ void setup() {
 
     delay(50);          // HD44780 necesita ≥40 ms tras power-on antes de recibir comandos
     lcd.init();
-    lcd.begin(20, 4);   // fuerza la inicialización del controlador explícitamente
-    //lcd.backlight();
+    lcd.begin(20, 4);  
+
 
     inicializarEEPROM();
     jackpotActual = leerJackpot();
+    saldoActual = leerSaldo();
+    apuestaActual = limitarApuesta(apuestaActual);
     DBG_VAL("[SETUP] Jackpot inicial", jackpotActual);
+    DBG_VAL("[SETUP] Saldo inicial", saldoActual);
 
     // A3 flotante: ruido eléctrico como semilla (A4/A5 ocupados por I2C)
     randomSeed(analogRead(A3));
@@ -693,9 +853,10 @@ void loop() {
     switch (estadoActual) {
         case EST_STANDBY:    manejarStandby();   break;
         case EST_MENU:       manejarMenu();      break;
+        case EST_AJUSTAR_APUESTA: manejarAjustarApuesta(); break;
         case EST_GIRANDO:    manejarGirando();   break;
         case EST_EVALUANDO:  manejarEvaluando(); break;
         case EST_RESULTADO:  manejarResultado(); break;
-        case EST_VER_PREMIO: manejarVerPremio(); break;
+        case EST_VER_SALDO:  manejarVerSaldo();  break;
     }
 }
