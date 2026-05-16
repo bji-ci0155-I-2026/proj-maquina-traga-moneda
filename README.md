@@ -574,7 +574,7 @@ static constexpr uint16_t DEBOUNCE_MS      = 200;  // Debounce de botones
 
 ## 14. Videos de demostración
 
-Demostración de proyecto en prototipo físico: [vid1](media/arduino_physical_prototype_video.mp4)
+Demostración de proyecto en prototipo físico: ![vid1](media/arduino_physical_prototype_video.mp4)
 
 Demostración de proyecto en simulación: [vid2](media/jackpot_simul.mp4)
 
